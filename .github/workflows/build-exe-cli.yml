@@ -12,6 +12,8 @@ on:
         required: false
         default: ''
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
@@ -72,27 +74,21 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
-
       - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
-
       - name: Cache pkg binaries
         uses: actions/cache@v4
         with:
           path: ~/.pkg-cache
           key: pkg-fetch-${{ matrix.target }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pkg-fetch-${{ matrix.target }}-
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
       - name: Build single executable
         run: pnpm exec tsx scripts/build-exe-cli.ts --targets=${{ matrix.target }}
-
       - name: Resolve artifact name
         id: artifact
         shell: bash
@@ -104,7 +100,6 @@ jobs:
             node24-win-arm64)   name=dsh-win-arm64 ;;
           esac
           echo "name=$name" >> "$GITHUB_OUTPUT"
-
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.artifact.outputs.name }}
@@ -122,14 +117,12 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-
       - name: Generate checksums
         run: |
           cd artifacts
           for f in dsh-*; do
             [ -f "$f" ] && sha256sum "$f" >> checksums.txt
           done
-
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
