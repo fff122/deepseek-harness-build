@@ -1,0 +1,139 @@
+name: Build CLI executables
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: >-
+          Comma-separated pkg targets. Any subset of:
+          node24-linux-x64, node24-linux-arm64, node24-win-x64, node24-win-arm64.
+          Empty builds all four.
+        type: string
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: build-exe-cli-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  plan:
+    name: Plan targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compute matrix
+        id: plan
+        env:
+          TARGETS: ${{ inputs.targets || 'node24-linux-x64,node24-linux-arm64,node24-win-x64,node24-win-arm64' }}
+        run: |
+          set -euo pipefail
+          matrix='[]'
+          IFS=',' read -r -a targets <<< "$TARGETS"
+          for raw in "${targets[@]}"; do
+            t="$(echo "$raw" | xargs)"
+            [ -z "$t" ] && continue
+            case "$t" in
+              node24-linux-x64)   runner=ubuntu-latest ;;
+              node24-linux-arm64) runner=ubuntu-24.04-arm ;;
+              node24-win-x64)     runner=windows-latest ;;
+              node24-win-arm64)   runner=windows-11-arm64 ;;
+              *)
+                echo "::error::Unknown target $t"
+                exit 1
+                ;;
+            esac
+            matrix="$(jq -c --arg target "$t" --arg runner "$runner" '. + [{target: $target, runner: $runner}]' <<< "$matrix")"
+          done
+          [ "$matrix" = '[]' ] && { echo "::error::No targets"; exit 1; }
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Cache pkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.pkg-cache
+          key: pkg-fetch-${{ matrix.target }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pkg-fetch-${{ matrix.target }}-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build single executable
+        run: pnpm exec tsx scripts/build-exe-cli.ts --targets=${{ matrix.target }}
+
+      - name: Resolve artifact name
+        id: artifact
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            node24-linux-x64)   name=dsh-linux-x64 ;;
+            node24-linux-arm64) name=dsh-linux-arm64 ;;
+            node24-win-x64)     name=dsh-win-x64 ;;
+            node24-win-arm64)   name=dsh-win-arm64 ;;
+          esac
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: dist-exe/dsh-*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    name: Create release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          for f in dsh-*; do
+            [ -f "$f" ] && sha256sum "$f" >> checksums.txt
+          done
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/dsh-*
+            artifacts/checksums.txt
+          generate_release_notes: true
